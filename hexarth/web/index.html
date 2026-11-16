@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#111418">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>HexArth Control</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --line:#2c333d; --fg:#e8ecf1; --dim:#8a94a3; --accent:#4cc38a; --stop:#e5484d; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,sans-serif; overscroll-behavior:none; }
+  main { max-width:900px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  header { display:flex; align-items:center; justify-content:space-between; }
+  h1 { font-size:18px; margin:0; letter-spacing:.02em; }
+  #conn { font-size:13px; color:var(--dim); display:flex; align-items:center; gap:6px; }
+  #dot { width:9px; height:9px; border-radius:50%; background:var(--dim); }
+  .pads { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; }
+  .label { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }
+  .pad { position:relative; width:100%; aspect-ratio:1; max-width:260px; margin:0 auto; border-radius:50%;
+         background:radial-gradient(circle,#232a33 0,#181d23 70%); border:1px solid var(--line); touch-action:none; }
+  .pad.h { aspect-ratio:3/1; border-radius:60px; max-width:none; }
+  .knob { position:absolute; left:50%; top:50%; width:34%; aspect-ratio:1; transform:translate(-50%,-50%);
+          border-radius:50%; background:var(--accent); opacity:.9; pointer-events:none; }
+  .pad.h .knob { width:auto; height:80%; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  button { font:inherit; color:var(--fg); background:#262d36; border:1px solid var(--line); border-radius:10px; padding:10px 14px; cursor:pointer; }
+  button:active { filter:brightness(1.3); }
+  #stop { width:100%; padding:18px; font-size:20px; font-weight:700; background:var(--stop); border:none; color:#fff; }
+  input[type=range] { flex:1; accent-color:var(--accent); }
+  input[type=text] { flex:1; min-width:0; font:13px ui-monospace,monospace; background:#0d1014; color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:10px; }
+  pre { margin:0; font:12px/1.4 ui-monospace,monospace; color:var(--dim); white-space:pre-wrap; word-break:break-all; max-height:180px; overflow:auto; }
+  .vel { font:13px ui-monospace,monospace; color:var(--dim); }
+  @media (max-width:560px){ .pads { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>HexArth</h1>
+    <div id="conn"><span id="dot"></span><span id="connText">connecting…</span></div>
+  </header>
+
+  <button id="stop">STOP</button>
+
+  <div class="pads">
+    <div class="panel">
+      <div class="label">Move (forward / strafe)</div>
+      <div class="pad" id="movePad"><div class="knob"></div></div>
+    </div>
+    <div class="panel">
+      <div class="label">Turn</div>
+      <div class="pad h" id="turnPad"><div class="knob"></div></div>
+      <div class="label" style="margin-top:16px">Speed</div>
+      <div class="row"><input type="range" id="speed" min="10" max="100" value="60"><span id="speedVal" class="vel">60%</span></div>
+      <div class="vel" id="vel" style="margin-top:12px">X 0 · Y 0 · Yaw 0</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="label">IMU</div>
+    <div class="row" style="margin-bottom:8px"><button id="imuBtn">Read</button><label class="vel"><input type="checkbox" id="imuAuto"> auto</label></div>
+    <pre id="imu">—</pre>
+  </div>
+
+  <div class="panel">
+    <div class="label">Raw JSON command</div>
+    <div class="row"><input type="text" id="raw" value='{"T":126}' spellcheck="false" autocapitalize="off"><button id="rawBtn">Send</button></div>
+    <pre id="rawOut" style="margin-top:8px"></pre>
+  </div>
+</main>
+
+<script>
+const state = { x:0, y:0, yaw:0, speed:0.6 };
+const $ = id => document.getElementById(id);
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+function setConn(ok, msg) {
+  $('dot').style.background = ok ? 'var(--accent)' : 'var(--stop)';
+  $('connText').textContent = msg;
+}
+
+// Joystick: drag a knob inside a pad; returns normalized [-1,1] values.
+function pad(el, onChange, horizontal) {
+  const knob = el.querySelector('.knob');
+  let id = null;
+  function update(e) {
+    const r = el.getBoundingClientRect();
+    let dx = (e.clientX - r.left - r.width/2) / (r.width/2);
+    let dy = horizontal ? 0 : (e.clientY - r.top - r.height/2) / (r.height/2);
+    const m = Math.hypot(dx, dy); if (m > 1) { dx /= m; dy /= m; }
+    const kx = horizontal ? dx * (r.width/2 - r.height*0.4) : dx * r.width/2 * 0.66;
+    knob.style.transform = `translate(calc(-50% + ${kx}px), calc(-50% + ${dy * r.height/2 * 0.66}px))`;
+    onChange(dx, dy);
+  }
+  function reset() { id = null; knob.style.transform = 'translate(-50%,-50%)'; onChange(0, 0); }
+  el.addEventListener('pointerdown', e => { id = e.pointerId; el.setPointerCapture(id); update(e); });
+  el.addEventListener('pointermove', e => { if (e.pointerId === id) update(e); });
+  el.addEventListener('pointerup', reset);
+  el.addEventListener('pointercancel', reset);
+}
+
+const dz = v => Math.abs(v) < 0.08 ? 0 : v;   // deadzone
+pad($('movePad'), (dx, dy) => { state.x = dz(-dy); state.y = dz(-dx); });   // up = forward, left = +Y
+pad($('turnPad'), (dx) => { state.yaw = dz(-dx); }, true);                  // left = +Yaw (CCW)
+
+$('speed').oninput = e => { state.speed = e.target.value / 100; $('speedVal').textContent = e.target.value + '%'; };
+
+// Keyboard: WASD + QE
+const keys = new Set();
+const keyAxes = () => {
+  state.x = (keys.has('w') - keys.has('s'));
+  state.y = (keys.has('a') - keys.has('d'));
+  state.yaw = (keys.has('q') - keys.has('e'));
+};
+addEventListener('keydown', e => { const k = e.key.toLowerCase(); if (e.target.tagName === 'INPUT') return;
+  if (k === ' ') { stop(); e.preventDefault(); return; }
+  if ('wasdqe'.includes(k)) { keys.add(k); keyAxes(); } });
+addEventListener('keyup', e => { const k = e.key.toLowerCase(); if (keys.delete(k)) keyAxes(); });
+
+async function stop() {
+  state.x = state.y = state.yaw = 0;
+  try { await api('/api/stop', {}); } catch (e) { setConn(false, e.message); }
+}
+$('stop').onclick = stop;
+
+// Send velocity at 10 Hz while the page is open. The server stops the robot
+// if these stop arriving (e.g. phone locks or Wi-Fi drops).
+setInterval(async () => {
+  const v = { x: state.x * state.speed, y: state.y * state.speed, yaw: state.yaw * state.speed };
+  $('vel').textContent = `X ${v.x.toFixed(2)} · Y ${v.y.toFixed(2)} · Yaw ${v.yaw.toFixed(2)}`;
+  try { await api('/api/move', v); } catch (e) { setConn(false, e.message); }
+}, 100);
+
+setInterval(async () => {
+  try { const s = await api('/api/status'); s.error ? setConn(false, 'robot: ' + s.error) : setConn(true, 'connected'); }
+  catch { setConn(false, 'app server offline'); }
+}, 1000);
+
+async function readImu() {
+  try { const r = await api('/api/imu'); $('imu').textContent = JSON.stringify(r.imu, null, 1); }
+  catch (e) { $('imu').textContent = 'error: ' + e.message; }
+}
+$('imuBtn').onclick = readImu;
+setInterval(() => { if ($('imuAuto').checked) readImu(); }, 500);
+
+$('rawBtn').onclick = async () => {
+  let cmd;
+  try { cmd = JSON.parse($('raw').value); } catch { $('rawOut').textContent = 'invalid JSON'; return; }
+  try { const r = await api('/api/raw', { cmd }); $('rawOut').textContent = JSON.stringify(r.reply, null, 1); }
+  catch (e) { $('rawOut').textContent = 'error: ' + e.message; }
+};
+document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+</script>
+</body>
+</html>
